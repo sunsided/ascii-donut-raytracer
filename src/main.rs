@@ -7,7 +7,7 @@ use crossterm::{
     cursor::{Hide, MoveTo, Show},
     execute,
     style::{Color, SetForegroundColor, ResetColor},
-    terminal::{size as term_size, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{size as term_size, EnterAlternateScreen, LeaveAlternateScreen},
 };
 
 #[derive(Copy, Clone, Debug, Default)]
@@ -70,51 +70,45 @@ fn torus_normal(p: Vec3, t: Vec2, tdir: Vec3) -> Vec3 {
 }
 
 fn get_color_from_intensity(intensity: f32) -> Color {
-    // Map intensity (0.0 to 1.0) to a smooth color gradient
-    // Dark blue -> Blue -> Cyan -> Green -> Yellow -> Orange -> Red -> White
+    // Map intensity (0.0 to 1.0) to a blue-to-orange temperature gradient
+    // Cool blue in shadows → Warm orange in bright spots
     let clamped = intensity.max(0.0).min(1.0);
     
-    if clamped < 0.125 {
-        // Dark blue to blue
-        let t = clamped * 8.0;
-        let blue = (50.0 + t * 100.0) as u8;
-        Color::Rgb { r: 0, g: 0, b: blue }
-    } else if clamped < 0.25 {
-        // Blue to cyan
-        let t = (clamped - 0.125) * 8.0;
-        let green = (t * 150.0) as u8;
-        Color::Rgb { r: 0, g: green, b: 200 }
-    } else if clamped < 0.375 {
-        // Cyan to green
-        let t = (clamped - 0.25) * 8.0;
-        let red = 0;
-        let green = (150.0 + t * 105.0) as u8;
-        let blue = (200.0 - t * 200.0) as u8;
+    if clamped < 0.2 {
+        // Dark shadows: Deep blue to medium blue
+        let t = clamped / 0.2;
+        let red = (t * 50.0) as u8;
+        let green = (t * 100.0) as u8;
+        let blue = (150.0 + t * 105.0) as u8;
         Color::Rgb { r: red, g: green, b: blue }
-    } else if clamped < 0.5 {
-        // Green to yellow
-        let t = (clamped - 0.375) * 8.0;
-        let red = (t * 200.0) as u8;
-        Color::Rgb { r: red, g: 255, b: 0 }
-    } else if clamped < 0.625 {
-        // Yellow to orange
-        let t = (clamped - 0.5) * 8.0;
-        let green = (255.0 - t * 55.0) as u8;
-        Color::Rgb { r: 255, g: green, b: 0 }
-    } else if clamped < 0.75 {
-        // Orange to red
-        let t = (clamped - 0.625) * 8.0;
-        let green = (200.0 - t * 200.0) as u8;
-        Color::Rgb { r: 255, g: green, b: 0 }
-    } else if clamped < 0.875 {
-        // Red to pink/white
-        let t = (clamped - 0.75) * 8.0;
-        let green = (t * 150.0) as u8;
-        let blue = (t * 150.0) as u8;
-        Color::Rgb { r: 255, g: green, b: blue }
+    } else if clamped < 0.4 {
+        // Medium shadows: Blue to cyan-blue
+        let t = (clamped - 0.2) / 0.2;
+        let red = (50.0 + t * 50.0) as u8;
+        let green = (100.0 + t * 100.0) as u8;
+        let blue = 255;
+        Color::Rgb { r: red, g: green, b: blue }
+    } else if clamped < 0.6 {
+        // Transition: Cyan to neutral white-ish
+        let t = (clamped - 0.4) / 0.2;
+        let red = (100.0 + t * 100.0) as u8;
+        let green = (200.0 + t * 55.0) as u8;
+        let blue = (255.0 - t * 100.0) as u8;
+        Color::Rgb { r: red, g: green, b: blue }
+    } else if clamped < 0.8 {
+        // Bright areas: Warm yellow to orange
+        let t = (clamped - 0.6) / 0.2;
+        let red = (200.0 + t * 55.0) as u8;
+        let green = (255.0 - t * 100.0) as u8;
+        let blue = (155.0 - t * 155.0) as u8;
+        Color::Rgb { r: red, g: green, b: blue }
     } else {
-        // Bright white for highest intensity
-        Color::Rgb { r: 255, g: 255, b: 255 }
+        // Brightest areas: Bright orange to white-orange
+        let t = (clamped - 0.8) / 0.2;
+        let red = 255;
+        let green = (155.0 + t * 100.0) as u8;
+        let blue = (t * 100.0) as u8;
+        Color::Rgb { r: red, g: green, b: blue }
     }
 }
 
@@ -129,7 +123,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // aspect and shading
     let aspect = width as f32 / height as f32;
     let pixel_aspect = 11.0f32 / 24.0; // non-square terminal pixels
-    let gradient = b" .:!/r(l1Z4H9W8$@";
+    let gradient = b" .:-=+*#%@"; // Brighter character progression
     let grad_size = (gradient.len() as i32) - 1;
     let min_col = 1.0 / grad_size as f32;
 
@@ -187,8 +181,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if ci > grad_size { ci = grad_size; }
                 let px = gradient[ci as usize];
                 
-                // Calculate color based on lighting intensity
-                let intensity = (diff / 10.0).min(1.0).max(0.0); // More sensitive to lighting changes
+                // Calculate color based on lighting intensity with better blending
+                let raw_intensity = diff / 8.0; // More sensitive to lighting changes
+                let intensity = raw_intensity.min(1.0).max(0.1); // Ensure minimum brightness
                 let color = get_color_from_intensity(intensity);
 
                 let idx = (i as usize) + (j as usize) * (width as usize);
@@ -198,8 +193,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         // draw
-        execute!(out, MoveTo(0, 0), Clear(ClearType::All))?;
+        execute!(out, MoveTo(0, 0))?; // Move to top-left, but don't clear screen
         for j in 0..height {
+            execute!(out, MoveTo(0, j))?; // Move to start of each line
             for i in 0..width {
                 let idx = (i as usize) + (j as usize) * (width as usize);
                 let ch = frame_buf[idx] as char;
@@ -209,9 +205,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 execute!(out, SetForegroundColor(color))?;
                 write!(out, "{}", ch)?;
             }
-            execute!(out, ResetColor)?;
-            write!(out, "\r\n")?;
         }
+        execute!(out, ResetColor)?;
         out.flush().unwrap();
 
         // small delay so it’s visible; adjust or remove as you like
