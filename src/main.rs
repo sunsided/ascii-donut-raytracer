@@ -6,6 +6,7 @@ use std::time::Duration;
 use crossterm::{
     cursor::{Hide, MoveTo, Show},
     execute,
+    style::{Color, SetForegroundColor, ResetColor},
     terminal::{size as term_size, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen},
 };
 
@@ -68,6 +69,55 @@ fn torus_normal(p: Vec3, t: Vec2, tdir: Vec3) -> Vec3 {
     Vec3::new(dx, dy, dz).norm()
 }
 
+fn get_color_from_intensity(intensity: f32) -> Color {
+    // Map intensity (0.0 to 1.0) to a smooth color gradient
+    // Dark blue -> Blue -> Cyan -> Green -> Yellow -> Orange -> Red -> White
+    let clamped = intensity.max(0.0).min(1.0);
+    
+    if clamped < 0.125 {
+        // Dark blue to blue
+        let t = clamped * 8.0;
+        let blue = (50.0 + t * 100.0) as u8;
+        Color::Rgb { r: 0, g: 0, b: blue }
+    } else if clamped < 0.25 {
+        // Blue to cyan
+        let t = (clamped - 0.125) * 8.0;
+        let green = (t * 150.0) as u8;
+        Color::Rgb { r: 0, g: green, b: 200 }
+    } else if clamped < 0.375 {
+        // Cyan to green
+        let t = (clamped - 0.25) * 8.0;
+        let red = 0;
+        let green = (150.0 + t * 105.0) as u8;
+        let blue = (200.0 - t * 200.0) as u8;
+        Color::Rgb { r: red, g: green, b: blue }
+    } else if clamped < 0.5 {
+        // Green to yellow
+        let t = (clamped - 0.375) * 8.0;
+        let red = (t * 200.0) as u8;
+        Color::Rgb { r: red, g: 255, b: 0 }
+    } else if clamped < 0.625 {
+        // Yellow to orange
+        let t = (clamped - 0.5) * 8.0;
+        let green = (255.0 - t * 55.0) as u8;
+        Color::Rgb { r: 255, g: green, b: 0 }
+    } else if clamped < 0.75 {
+        // Orange to red
+        let t = (clamped - 0.625) * 8.0;
+        let green = (200.0 - t * 200.0) as u8;
+        Color::Rgb { r: 255, g: green, b: 0 }
+    } else if clamped < 0.875 {
+        // Red to pink/white
+        let t = (clamped - 0.75) * 8.0;
+        let green = (t * 150.0) as u8;
+        let blue = (t * 150.0) as u8;
+        Color::Rgb { r: 255, g: green, b: blue }
+    } else {
+        // Bright white for highest intensity
+        Color::Rgb { r: 255, g: 255, b: 255 }
+    }
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // terminal setup
     let mut out = stdout();
@@ -93,6 +143,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let torus = Vec2::new(out_rad, in_rad);
 
     let mut frame_buf = vec![b' '; (width as usize) * (height as usize)];
+    let mut color_buf = vec![Color::Reset; (width as usize) * (height as usize)];
 
     for t in 0..moving {
         // rotate torus axis over time: start with (1,1,1) and rotate around Z
@@ -103,6 +154,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // clear frame buffer
         frame_buf.fill(b' ');
+        color_buf.fill(Color::Reset);
 
         for j in 0..height {
             for i in 0..width {
@@ -134,18 +186,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if ci < 0 { ci = 0; }
                 if ci > grad_size { ci = grad_size; }
                 let px = gradient[ci as usize];
+                
+                // Calculate color based on lighting intensity
+                let intensity = (diff / 10.0).min(1.0).max(0.0); // More sensitive to lighting changes
+                let color = get_color_from_intensity(intensity);
 
-                frame_buf[(i as usize) + (j as usize) * (width as usize)] = px;
+                let idx = (i as usize) + (j as usize) * (width as usize);
+                frame_buf[idx] = px;
+                color_buf[idx] = color;
             }
         }
 
         // draw
         execute!(out, MoveTo(0, 0), Clear(ClearType::All))?;
         for j in 0..height {
-            let start = (j as usize) * (width as usize);
-            let end = start + (width as usize);
-            out.write_all(&frame_buf[start..end]).unwrap();
-            out.write_all(b"\r\n").unwrap();
+            for i in 0..width {
+                let idx = (i as usize) + (j as usize) * (width as usize);
+                let ch = frame_buf[idx] as char;
+                let color = color_buf[idx];
+                
+                // Set color and write character
+                execute!(out, SetForegroundColor(color))?;
+                write!(out, "{}", ch)?;
+            }
+            execute!(out, ResetColor)?;
+            write!(out, "\r\n")?;
         }
         out.flush().unwrap();
 
