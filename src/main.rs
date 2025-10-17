@@ -10,6 +10,8 @@ use crossterm::{
     terminal::{size as term_size, EnterAlternateScreen, LeaveAlternateScreen},
 };
 
+const COLOR_SCALE: f32 = 1.5; // Adjusted scaling factor for color intensity
+
 #[derive(Copy, Clone, Debug, Default)]
 struct Vec2 {
     x: f32,
@@ -25,6 +27,7 @@ struct Vec3 {
     y: f32,
     z: f32,
 }
+
 impl Vec3 {
     fn new(x: f32, y: f32, z: f32) -> Self { Self { x, y, z } }
     fn add(self, o: Vec3) -> Self { Self::new(self.x + o.x, self.y + o.y, self.z + o.z) }
@@ -69,47 +72,51 @@ fn torus_normal(p: Vec3, t: Vec2, tdir: Vec3) -> Vec3 {
     Vec3::new(dx, dy, dz).norm()
 }
 
+// Helper to linearly interpolate between two u8 values
+fn lerp(a: u8, b: u8, t: f32) -> u8 {
+    (a as f32 + (b as f32 - a as f32) * t).round().clamp(0.0, 255.0) as u8
+}
+
+// Helper to linearly interpolate between two Color::Rgb
+fn lerp_color(a: &Color, b: &Color, t: f32) -> Color {
+    match (a, b) {
+        (Color::Rgb { r: r1, g: g1, b: b1 }, Color::Rgb { r: r2, g: g2, b: b2 }) => {
+            Color::Rgb {
+                r: lerp(*r1, *r2, t),
+                g: lerp(*g1, *g2, t),
+                b: lerp(*b1, *b2, t),
+            }
+        }
+        _ => *a, // fallback, should not happen
+    }
+}
+
 fn get_color_from_intensity(intensity: f32) -> Color {
-    // Map intensity (0.0 to 1.0) to a blue-to-orange temperature gradient
-    // Cool blue in shadows → Warm orange in bright spots
+    // Gradient stops: (threshold, Color)
+    // Blue to orange temperature gradient
+    const GRADIENT: &[(f32, Color)] = &[
+        (0.0,  Color::Rgb { r: 0,   g: 0,   b: 150 }),   // Deep blue
+        (0.2,  Color::Rgb { r: 50,  g: 100, b: 255 }),   // Medium blue
+        (0.4,  Color::Rgb { r: 100, g: 200, b: 255 }),   // Cyan
+        (0.6,  Color::Rgb { r: 200, g: 255, b: 155 }),   // Yellowish
+        (0.8,  Color::Rgb { r: 255, g: 155, b: 0   }),   // Orange
+        (1.0,  Color::Rgb { r: 255, g: 255, b: 100 }),   // White-orange
+    ];
+    
     let clamped = intensity.max(0.0).min(1.0);
     
-    if clamped < 0.2 {
-        // Dark shadows: Deep blue to medium blue
-        let t = clamped / 0.2;
-        let red = (t * 50.0) as u8;
-        let green = (t * 100.0) as u8;
-        let blue = (150.0 + t * 105.0) as u8;
-        Color::Rgb { r: red, g: green, b: blue }
-    } else if clamped < 0.4 {
-        // Medium shadows: Blue to cyan-blue
-        let t = (clamped - 0.2) / 0.2;
-        let red = (50.0 + t * 50.0) as u8;
-        let green = (100.0 + t * 100.0) as u8;
-        let blue = 255;
-        Color::Rgb { r: red, g: green, b: blue }
-    } else if clamped < 0.6 {
-        // Transition: Cyan to neutral white-ish
-        let t = (clamped - 0.4) / 0.2;
-        let red = (100.0 + t * 100.0) as u8;
-        let green = (200.0 + t * 55.0) as u8;
-        let blue = (255.0 - t * 100.0) as u8;
-        Color::Rgb { r: red, g: green, b: blue }
-    } else if clamped < 0.8 {
-        // Bright areas: Warm yellow to orange
-        let t = (clamped - 0.6) / 0.2;
-        let red = (200.0 + t * 55.0) as u8;
-        let green = (255.0 - t * 100.0) as u8;
-        let blue = (155.0 - t * 155.0) as u8;
-        Color::Rgb { r: red, g: green, b: blue }
-    } else {
-        // Brightest areas: Bright orange to white-orange
-        let t = (clamped - 0.8) / 0.2;
-        let red = 255;
-        let green = (155.0 + t * 100.0) as u8;
-        let blue = (t * 100.0) as u8;
-        Color::Rgb { r: red, g: green, b: blue }
+    // Find the two stops between which clamped falls
+    for i in 0..GRADIENT.len() - 1 {
+        let (t0, c0) = GRADIENT[i];
+        let (t1, c1) = GRADIENT[i + 1];
+        if clamped >= t0 && clamped <= t1 {
+            let t = (clamped - t0) / (t1 - t0);
+            return lerp_color(&c0, &c1, t);
+        }
     }
+    
+    // Fallback: if clamped == 1.0 exactly, return last color
+    GRADIENT.last().unwrap().1
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -182,8 +189,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let px = gradient[ci as usize];
                 
                 // Calculate color based on lighting intensity with better blending
-                let raw_intensity = diff / 8.0; // More sensitive to lighting changes
-                let intensity = raw_intensity.min(1.0).max(0.1); // Ensure minimum brightness
+                let raw_intensity = diff / COLOR_SCALE; // More sensitive to lighting changes
+                let intensity = raw_intensity.clamp(0.1, 1.0); // Ensure minimum brightness
                 let color = get_color_from_intensity(intensity);
 
                 let idx = (i as usize) + (j as usize) * (width as usize);
