@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use crossterm::{
     cursor::{Hide, MoveTo, Show},
-    execute,
+    execute, queue,
     style::{Color, SetForegroundColor, ResetColor},
     terminal::{size as term_size, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -199,22 +199,43 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-        // draw
-        execute!(out, MoveTo(0, 0))?; // Move to top-left, but don't clear screen
+        // draw with optimized color batching
+        queue!(out, MoveTo(0, 0))?; // Move to top-left
+        
         for j in 0..height {
-            execute!(out, MoveTo(0, j))?; // Move to start of each line
+            queue!(out, MoveTo(0, j))?; // Move to start of each line
+            
+            let mut current_color = Color::Reset;
+            let mut line_buffer = String::new();
+            
             for i in 0..width {
                 let idx = (i as usize) + (j as usize) * (width as usize);
                 let ch = frame_buf[idx] as char;
                 let color = color_buf[idx];
                 
-                // Set color and write character
-                execute!(out, SetForegroundColor(color))?;
-                write!(out, "{}", ch)?;
+                // Only change color when it's different from current
+                if color != current_color {
+                    // Flush any buffered characters with previous color
+                    if !line_buffer.is_empty() {
+                        queue!(out, SetForegroundColor(current_color))?;
+                        write!(out, "{}", line_buffer)?;
+                        line_buffer.clear();
+                    }
+                    current_color = color;
+                }
+                
+                line_buffer.push(ch);
+            }
+            
+            // Flush remaining characters for this line
+            if !line_buffer.is_empty() {
+                queue!(out, SetForegroundColor(current_color))?;
+                write!(out, "{}", line_buffer)?;
             }
         }
-        execute!(out, ResetColor)?;
-        out.flush().unwrap();
+        
+        queue!(out, ResetColor)?;
+        out.flush()?;
 
         // small delay so it’s visible; adjust or remove as you like
         sleep(Duration::from_millis(16));
