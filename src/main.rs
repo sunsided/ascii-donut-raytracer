@@ -5,9 +5,12 @@ use std::time::Duration;
 
 use crossterm::{
     cursor::{Hide, MoveTo, Show},
-    execute,
-    terminal::{size as term_size, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen},
+    execute, queue,
+    style::{Color, SetForegroundColor, ResetColor},
+    terminal::{size as term_size, EnterAlternateScreen, LeaveAlternateScreen},
 };
+
+const COLOR_SCALE: f32 = 1.5; // Adjusted scaling factor for color intensity
 
 #[derive(Copy, Clone, Debug, Default)]
 struct Vec2 {
@@ -24,6 +27,7 @@ struct Vec3 {
     y: f32,
     z: f32,
 }
+
 impl Vec3 {
     fn new(x: f32, y: f32, z: f32) -> Self { Self { x, y, z } }
     fn add(self, o: Vec3) -> Self { Self::new(self.x + o.x, self.y + o.y, self.z + o.z) }
@@ -68,6 +72,53 @@ fn torus_normal(p: Vec3, t: Vec2, tdir: Vec3) -> Vec3 {
     Vec3::new(dx, dy, dz).norm()
 }
 
+// Helper to linearly interpolate between two u8 values
+fn lerp(a: u8, b: u8, t: f32) -> u8 {
+    (a as f32 + (b as f32 - a as f32) * t).round().clamp(0.0, 255.0) as u8
+}
+
+// Helper to linearly interpolate between two Color::Rgb
+fn lerp_color(a: &Color, b: &Color, t: f32) -> Color {
+    match (a, b) {
+        (Color::Rgb { r: r1, g: g1, b: b1 }, Color::Rgb { r: r2, g: g2, b: b2 }) => {
+            Color::Rgb {
+                r: lerp(*r1, *r2, t),
+                g: lerp(*g1, *g2, t),
+                b: lerp(*b1, *b2, t),
+            }
+        }
+        _ => *a, // fallback, should not happen
+    }
+}
+
+fn get_color_from_intensity(intensity: f32) -> Color {
+    // Gradient stops: (threshold, Color)
+    // Blue to orange temperature gradient
+    const GRADIENT: &[(f32, Color)] = &[
+        (0.0,  Color::Rgb { r: 0,   g: 0,   b: 150 }),   // Deep blue
+        (0.2,  Color::Rgb { r: 50,  g: 100, b: 255 }),   // Medium blue
+        (0.4,  Color::Rgb { r: 100, g: 200, b: 255 }),   // Cyan
+        (0.6,  Color::Rgb { r: 200, g: 255, b: 155 }),   // Yellowish
+        (0.8,  Color::Rgb { r: 255, g: 155, b: 0   }),   // Orange
+        (1.0,  Color::Rgb { r: 255, g: 255, b: 100 }),   // White-orange
+    ];
+    
+    let clamped = intensity.max(0.0).min(1.0);
+    
+    // Find the two stops between which clamped falls
+    for i in 0..GRADIENT.len() - 1 {
+        let (t0, c0) = GRADIENT[i];
+        let (t1, c1) = GRADIENT[i + 1];
+        if clamped >= t0 && clamped <= t1 {
+            let t = (clamped - t0) / (t1 - t0);
+            return lerp_color(&c0, &c1, t);
+        }
+    }
+    
+    // Fallback: if clamped == 1.0 exactly, return last color
+    GRADIENT.last().unwrap().1
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // terminal setup
     let mut out = stdout();
@@ -79,7 +130,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // aspect and shading
     let aspect = width as f32 / height as f32;
     let pixel_aspect = 11.0f32 / 24.0; // non-square terminal pixels
-    let gradient = b" .:!/r(l1Z4H9W8$@";
+    let gradient = b" .:-=+*#%@"; // Brighter character progression
     let grad_size = (gradient.len() as i32) - 1;
     let min_col = 1.0 / grad_size as f32;
 
@@ -93,6 +144,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let torus = Vec2::new(out_rad, in_rad);
 
     let mut frame_buf = vec![b' '; (width as usize) * (height as usize)];
+    let mut color_buf = vec![Color::Reset; (width as usize) * (height as usize)];
 
     for t in 0..moving {
         // rotate torus axis over time: start with (1,1,1) and rotate around Z
@@ -103,6 +155,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // clear frame buffer
         frame_buf.fill(b' ');
+        color_buf.fill(Color::Reset);
 
         for j in 0..height {
             for i in 0..width {
@@ -134,20 +187,55 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if ci < 0 { ci = 0; }
                 if ci > grad_size { ci = grad_size; }
                 let px = gradient[ci as usize];
+                
+                // Calculate color based on lighting intensity with better blending
+                let raw_intensity = diff / COLOR_SCALE; // More sensitive to lighting changes
+                let intensity = raw_intensity.clamp(0.1, 1.0); // Ensure minimum brightness
+                let color = get_color_from_intensity(intensity);
 
-                frame_buf[(i as usize) + (j as usize) * (width as usize)] = px;
+                let idx = (i as usize) + (j as usize) * (width as usize);
+                frame_buf[idx] = px;
+                color_buf[idx] = color;
             }
         }
 
-        // draw
-        execute!(out, MoveTo(0, 0), Clear(ClearType::All))?;
+        // draw with optimized color batching
+        queue!(out, MoveTo(0, 0))?; // Move to top-left
+        
         for j in 0..height {
-            let start = (j as usize) * (width as usize);
-            let end = start + (width as usize);
-            out.write_all(&frame_buf[start..end]).unwrap();
-            out.write_all(b"\r\n").unwrap();
+            queue!(out, MoveTo(0, j))?; // Move to start of each line
+            
+            let mut current_color = Color::Reset;
+            let mut line_buffer = String::new();
+            
+            for i in 0..width {
+                let idx = (i as usize) + (j as usize) * (width as usize);
+                let ch = frame_buf[idx] as char;
+                let color = color_buf[idx];
+                
+                // Only change color when it's different from current
+                if color != current_color {
+                    // Flush any buffered characters with previous color
+                    if !line_buffer.is_empty() {
+                        queue!(out, SetForegroundColor(current_color))?;
+                        write!(out, "{}", line_buffer)?;
+                        line_buffer.clear();
+                    }
+                    current_color = color;
+                }
+                
+                line_buffer.push(ch);
+            }
+            
+            // Flush remaining characters for this line
+            if !line_buffer.is_empty() {
+                queue!(out, SetForegroundColor(current_color))?;
+                write!(out, "{}", line_buffer)?;
+            }
         }
-        out.flush().unwrap();
+        
+        queue!(out, ResetColor)?;
+        out.flush()?;
 
         // small delay so it’s visible; adjust or remove as you like
         sleep(Duration::from_millis(16));
